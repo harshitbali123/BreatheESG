@@ -67,6 +67,29 @@ class ReviewActionSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
+class ActivityEditSerializer(serializers.Serializer):
+    """
+    Accepts editable fields for fixing flagged/warning activities.
+    All fields are optional — only the ones the user provides will be updated.
+    CO2 is recalculated automatically based on the new original_value.
+    """
+    original_value    = serializers.DecimalField(max_digits=18, decimal_places=4, required=False)
+    original_unit     = serializers.CharField(max_length=20, required=False)
+    original_amount   = serializers.DecimalField(max_digits=18, decimal_places=2, required=False, allow_null=True)
+    original_currency = serializers.CharField(max_length=3, required=False, allow_blank=True)
+    activity_date     = serializers.DateField(required=False)
+    period_end        = serializers.DateField(required=False, allow_null=True)
+    description       = serializers.CharField(max_length=500, required=False, allow_blank=True)
+    facility_code     = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    facility_name     = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    cost_center       = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    vendor            = serializers.CharField(max_length=255, required=False, allow_blank=True)
+    country_code      = serializers.CharField(max_length=2, required=False, allow_blank=True)
+    cabin_class       = serializers.CharField(max_length=30, required=False, allow_blank=True)
+    edit_note         = serializers.CharField(required=False, allow_blank=True, default="")
+    clear_flags       = serializers.BooleanField(required=False, default=True)
+
+
 class BulkApproveSerializer(serializers.Serializer):
     ids = serializers.ListField(
         child=serializers.UUIDField(),

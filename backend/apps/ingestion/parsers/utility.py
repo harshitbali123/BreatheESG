@@ -45,6 +45,12 @@ Real-world quirks this parser handles
    A billing period longer than 95 days or shorter than 10 days is
    unusual — we flag it. Most billing cycles are 28–35 days.
 
+8. Flexible column mapping (resilient ingestion).
+   Files from different utility portals use different column headers.
+   We use an alias system so that e.g. "Usage_Value", "consumption_kwh",
+   "kwh", "usage_kwh" all map to the internal "consumption_kwh" key.
+   Only columns essential for CO2 calculation cause failure when missing.
+
 What this parser does NOT handle
 ----------------------------------
 - Market-based Scope 2 (RECs, PPAs, green tariffs). All rows are
@@ -75,21 +81,75 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# Column headers we expect in the utility portal CSV.
-# Keys are the exact strings in the file header row.
-# Values are internal keys used throughout this parser.
-HEADER_MAP = {
-    "account_number":       "account_number",
-    "meter_id":             "meter_id",
-    "service_address":      "service_address",
-    "billing_period_start": "period_start",
-    "billing_period_end":   "period_end",
-    "consumption_kwh":      "consumption_kwh",
-    "demand_kw":            "demand_kw",
-    "amount":               "amount",
-    "currency":             "currency",
-    "tariff_code":          "tariff_code",
+# ---------------------------------------------------------------------------
+# Flexible column alias map
+# ---------------------------------------------------------------------------
+# Each internal key maps to a list of aliases (case-insensitive) that should
+# be recognised in incoming files. The first matching alias wins.
+# Priority: columns essential for CO2 calculation are marked as CRITICAL.
+#
+# CRITICAL for CO2 = consumption_kwh, period_start (at least one date)
+# All other fields are OPTIONAL — ingestion proceeds even if they are absent.
+
+COLUMN_ALIASES = {
+    "consumption_kwh": [
+        "consumption_kwh", "usage_value", "kwh", "usage_kwh",
+        "consumption", "total_kwh", "energy_kwh", "units_consumed",
+    ],
+    "period_start": [
+        "billing_period_start", "bill_start_date", "period_start",
+        "start_date", "from_date", "bill_from",
+    ],
+    "period_end": [
+        "billing_period_end", "bill_end_date", "period_end",
+        "end_date", "to_date", "bill_to",
+    ],
+    "meter_id": [
+        "meter_id", "account_number", "account_no", "meter_number",
+        "meter_no", "meter_ref", "meter",
+    ],
+    "service_address": [
+        "service_address", "address", "site_address", "location",
+        "site", "facility",
+    ],
+    "demand_kw": [
+        "demand_kw", "peak_demand_kw", "peak_demand", "max_demand",
+        "demand",
+    ],
+    "amount": [
+        "amount", "total_amount", "bill_amount", "cost", "charge",
+        "total_cost", "total_charge",
+    ],
+    "currency": [
+        "currency", "currency_code", "ccy",
+    ],
+    "tariff_code": [
+        "tariff_code", "rate_schedule", "tariff", "rate_code",
+        "plan_code", "tariff_type",
+    ],
 }
+
+
+def _build_column_map(fieldnames: list[str]) -> dict[str, str]:
+    """
+    Given the raw CSV column headers, build a mapping:
+        raw_column_name -> internal_key
+
+    Uses case-insensitive matching against COLUMN_ALIASES.
+    Columns not matching any alias are kept as-is (pass-through).
+    """
+    mapping = {}
+    normalised_fields = {f.strip().lower(): f.strip() for f in fieldnames if f}
+
+    for internal_key, aliases in COLUMN_ALIASES.items():
+        for alias in aliases:
+            if alias.lower() in normalised_fields:
+                original_header = normalised_fields[alias.lower()]
+                mapping[original_header] = internal_key
+                break  # first match wins
+
+    return mapping
+
 
 # Tariff codes we recognise. Anything outside this set gets flagged.
 # These cover the codes present in our sample data and common real-world
@@ -139,6 +199,10 @@ class UtilityParser(BaseParser):
         Header translation: we normalise the incoming header names
         to internal keys so the rest of the parser never touches raw
         column names.
+
+        Resilient column mapping: uses COLUMN_ALIASES to recognise
+        many common column name variants. Only fails if the columns
+        critical for CO2 calculation are truly absent.
         """
         raw_bytes = file_obj.read()
 
@@ -158,16 +222,44 @@ class UtilityParser(BaseParser):
         if reader.fieldnames is None:
             raise ValueError("File appears to be empty — no header row found.")
 
-        # Validate that the required columns are present before processing
-        # any rows, so we fail fast with a clear message.
-        incoming = {h.strip() for h in reader.fieldnames}
-        required = {"meter_id", "billing_period_start",
-                    "billing_period_end", "consumption_kwh"}
-        missing = required - incoming
-        if missing:
+        # Build flexible column mapping from aliases
+        col_map = _build_column_map(reader.fieldnames)
+
+        # --- Check ONLY critical columns for CO2 calculation ---
+        # Critical: consumption_kwh (the quantity to multiply by EF)
+        # At least one date is needed (period_start preferred, period_end as fallback)
+        mapped_internal_keys = set(col_map.values())
+
+        if "consumption_kwh" not in mapped_internal_keys:
             raise ValueError(
-                f"Missing required columns: {', '.join(sorted(missing))}. "
-                f"Found: {', '.join(sorted(incoming))}"
+                f"Missing critical column for CO2 calculation: 'consumption_kwh'. "
+                f"Expected one of: {', '.join(COLUMN_ALIASES['consumption_kwh'])}. "
+                f"Found columns: {', '.join(sorted(h.strip() for h in reader.fieldnames if h))}"
+            )
+
+        has_start = "period_start" in mapped_internal_keys
+        has_end = "period_end" in mapped_internal_keys
+        if not has_start and not has_end:
+            raise ValueError(
+                f"Missing critical column for CO2 calculation: at least one billing date "
+                f"(period start or end) is required. "
+                f"Expected one of: {', '.join(COLUMN_ALIASES['period_start'] + COLUMN_ALIASES['period_end'])}. "
+                f"Found columns: {', '.join(sorted(h.strip() for h in reader.fieldnames if h))}"
+            )
+
+        # Log which optional columns were not found
+        optional_missing = []
+        for key in COLUMN_ALIASES:
+            if key not in mapped_internal_keys and key != "consumption_kwh":
+                if key in ("period_start", "period_end"):
+                    if has_start or has_end:
+                        continue  # at least one date found
+                optional_missing.append(key)
+
+        if optional_missing:
+            logger.info(
+                "Utility parser: optional columns not found (will use defaults): %s",
+                ", ".join(optional_missing),
             )
 
         for raw_row in reader:
@@ -176,7 +268,7 @@ class UtilityParser(BaseParser):
                        if k is not None}
             # Translate to internal keys; unknown columns kept as-is
             yield {
-                HEADER_MAP.get(k, k): v for k, v in cleaned.items()
+                col_map.get(k, k): v for k, v in cleaned.items()
             }
 
     # ------------------------------------------------------------------ #
@@ -188,13 +280,25 @@ class UtilityParser(BaseParser):
         """
         warnings = []
 
-        # Required fields
-        for field in ("meter_id", "period_start", "period_end",
-                      "consumption_kwh"):
-            if not raw.get(field):
-                warnings.append(
-                    f"missing_required_field: '{field}' is blank"
-                )
+        # Critical field: consumption_kwh
+        if not raw.get("consumption_kwh"):
+            warnings.append(
+                "missing_critical_field: 'consumption_kwh' is blank — "
+                "cannot calculate CO2 emissions"
+            )
+
+        # At least one date
+        if not raw.get("period_start") and not raw.get("period_end"):
+            warnings.append(
+                "missing_critical_field: both billing period dates are blank"
+            )
+
+        # Optional fields — warn but don't block
+        if not raw.get("meter_id"):
+            warnings.append(
+                "missing_optional_field: 'meter_id' is blank — "
+                "row will still be ingested"
+            )
 
         # Tariff code check
         tariff = raw.get("tariff_code", "").strip()
@@ -261,7 +365,7 @@ class UtilityParser(BaseParser):
         raw    = raw_row.raw_data
         tenant = run.tenant
 
-        # ── Parse consumption ─────────────────────────────────────────
+        # ── Parse consumption (CRITICAL for CO2) ──────────────────────
         try:
             kwh = Decimal(
                 raw.get("consumption_kwh", "0")
@@ -277,34 +381,32 @@ class UtilityParser(BaseParser):
             raw_row.save(update_fields=["parse_status", "parse_errors"])
             return None
 
-        # ── Parse dates ───────────────────────────────────────────────
+        # ── Parse dates (at least one needed) ─────────────────────────
         period_start = parse_flexible_date(raw.get("period_start", ""))
         period_end   = parse_flexible_date(raw.get("period_end", ""))
 
-        if period_start is None:
+        # If we have neither date, fail — we need at least one for activity_date
+        if period_start is None and period_end is None:
             raw_row.parse_status = RawRow.ParseStatus.FAILED
             raw_row.parse_errors = raw_row.parse_errors + [
-                f"invalid_date: billing_period_start "
-                f"'{raw.get('period_start')}' could not be parsed"
+                "missing_critical_date: neither billing period start nor end "
+                "could be parsed — at least one date is required for CO2 calculation"
             ]
             raw_row.save(update_fields=["parse_status", "parse_errors"])
             return None
 
+        # Use whichever date we have as fallback
+        if period_start is None:
+            period_start = period_end
         if period_end is None:
-            raw_row.parse_status = RawRow.ParseStatus.FAILED
-            raw_row.parse_errors = raw_row.parse_errors + [
-                f"invalid_date: billing_period_end "
-                f"'{raw.get('period_end')}' could not be parsed"
-            ]
-            raw_row.save(update_fields=["parse_status", "parse_errors"])
-            return None
+            period_end = period_start
 
         # ── Resolve emission factor ───────────────────────────────────
         ef_value, ef_source = _resolve_emission_factor(tenant)
 
         kg_co2e = kwh * ef_value
 
-        # ── Parse monetary amount ─────────────────────────────────────
+        # ── Parse monetary amount (optional) ──────────────────────────
         try:
             original_amount = Decimal(
                 raw.get("amount", "0").replace(",", ".").strip() or "0"

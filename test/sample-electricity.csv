@@ -1,0 +1,4 @@
+Account_No,Service_Address,Type,Bill_Start_Date,Bill_End_Date,Usage_Value,Unit,Peak_Demand_kW,Total_Amount,Rate_Schedule,Notes
+SA1234,"123 Main St, CityA",Electricity,2024-11-20,2024-12-21,1500.5,kWh,23.5,200.40,TOU-Peak,Estimated read
+SA5678,"456 Pine Rd, CityB",Electricity,11/15/2024,12/14/2024,1200.0,kWh,18.2,160.20,Flat-Rate,
+SA1234,"123 Main St, CityA",Electricity,2024-12-21,2025-01-20,1600.0,kWh,24.0,215.50,TOU-Peak,Actual read

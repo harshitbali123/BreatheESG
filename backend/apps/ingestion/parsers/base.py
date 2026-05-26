@@ -106,6 +106,12 @@ def parse_flexible_date(date_str: str):
     # Remove ordinal suffixes so "3rd January 2024" becomes "3 January 2024"
     s = _ORDINAL_RE.sub(r'\1', s)
 
+    # Strip ISO 8601 timezone suffixes: Z, +00:00, -05:30, etc.
+    # "2026-05-10T09:30:00Z" → "2026-05-10T09:30:00"
+    # "2026-05-10T09:30:00+05:30" → "2026-05-10T09:30:00"
+    s = re.sub(r'[Zz]$', '', s)
+    s = re.sub(r'[+\-]\d{2}:\d{2}$', '', s)
+
     for fmt in _DATE_FORMATS:
         try:
             dt = datetime.strptime(s, fmt)

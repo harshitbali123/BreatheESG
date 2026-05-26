@@ -56,12 +56,22 @@ class UploadSerializer(serializers.Serializer):
 
 
 class RawRowSerializer(serializers.ModelSerializer):
+    activity_id = serializers.SerializerMethodField()
+
     class Meta:
         model  = RawRow
         fields = [
             "id", "row_number", "raw_data",
             "parse_status", "parse_errors", "created_at",
+            "activity_id",
         ]
+
+    def get_activity_id(self, obj):
+        """Return the related NormalizedActivity ID if one exists."""
+        try:
+            return str(obj.activity.id) if hasattr(obj, 'activity') else None
+        except Exception:
+            return None
 
 
 class IngestionRunSerializer(serializers.ModelSerializer):

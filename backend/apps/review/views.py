@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from apps.audit.models import AuditLog
 from apps.normalization.models import NormalizedActivity
 
-from .serializers import BulkApproveSerializer, NormalizedActivityListSerializer, ReviewActionSerializer
+from .serializers import ActivityEditSerializer, BulkApproveSerializer, NormalizedActivityListSerializer, ReviewActionSerializer
 
 
 class LockedActivityError(Exception):
@@ -233,6 +233,139 @@ class NormalizedActivityViewSet(viewsets.ReadOnlyModelViewSet):
             }
         )
 
+    @action(detail=True, methods=["post"], url_path="edit")
+    def edit(self, request, pk=None):
+        """
+        POST /api/review/activities/:id/edit/
+
+        Edit a flagged/warning activity to fix data issues.
+        Accepts any subset of editable fields. CO2 is automatically
+        recalculated when original_value changes.
+
+        When clear_flags=true (default), the activity's suspicious flags
+        are cleared and the raw_row status is set back to OK.
+        """
+        serializer = ActivityEditSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            with transaction.atomic():
+                activity = self.get_object()
+
+                if activity.review_status == NormalizedActivity.ReviewStatus.LOCKED:
+                    return Response(
+                        {"detail": "This activity is locked and cannot be modified."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                before = _snapshot(activity)
+                ip = _get_client_ip(request)
+
+                # Track which fields were changed
+                changed_fields = []
+
+                # --- Update simple text/date fields ---
+                simple_fields = [
+                    "original_unit", "original_amount", "original_currency",
+                    "activity_date", "period_end", "description",
+                    "facility_code", "facility_name", "cost_center",
+                    "vendor", "country_code",
+                ]
+                for field in simple_fields:
+                    if field in data:
+                        old_val = getattr(activity, field)
+                        new_val = data[field]
+                        if str(old_val) != str(new_val):
+                            setattr(activity, field, new_val)
+                            changed_fields.append(field)
+
+                # --- Update original_value and recalculate CO2 ---
+                if "original_value" in data:
+                    old_value = activity.original_value
+                    new_value = data["original_value"]
+                    if old_value != new_value:
+                        activity.original_value = new_value
+                        changed_fields.append("original_value")
+
+                        # Recalculate CO2: new_value × existing emission factor
+                        from decimal import Decimal
+                        ef = activity.emission_factor_used
+                        activity.normalized_kg_co2e = round(new_value * ef, 6)
+                        changed_fields.append("normalized_kg_co2e")
+
+                # --- Clear flags if requested ---
+                clear_flags = data.get("clear_flags", True)
+                if clear_flags:
+                    if activity.is_flagged_suspicious:
+                        activity.is_flagged_suspicious = False
+                        activity.flag_reasons = []
+                        changed_fields.extend(["is_flagged_suspicious", "flag_reasons"])
+
+                    # Also update the raw_row status
+                    raw_row = activity.raw_row
+                    if raw_row.parse_status != "ok":
+                        raw_row.parse_status = "ok"
+                        raw_row.parse_errors = []
+                        raw_row.save(update_fields=["parse_status", "parse_errors"])
+
+                    # Set review status to pending for re-review
+                    if activity.review_status in (
+                        NormalizedActivity.ReviewStatus.FLAGGED,
+                        NormalizedActivity.ReviewStatus.PENDING,
+                    ):
+                        activity.review_status = NormalizedActivity.ReviewStatus.PENDING
+                        changed_fields.append("review_status")
+
+                # --- Mark as edited ---
+                activity.was_edited = True
+                activity.edited_by = request.user
+                activity.edited_at = timezone.now()
+                activity.edit_note = data.get("edit_note", "")
+
+                # Also update raw_data on the raw_row to reflect edits
+                raw_row = activity.raw_row
+                raw_data = dict(raw_row.raw_data) if raw_row.raw_data else {}
+                field_to_raw_key = {
+                    "original_value": _guess_raw_key(raw_data, activity.activity_type, "value"),
+                    "cost_center": _guess_raw_key(raw_data, activity.activity_type, "cost_center"),
+                    "facility_code": _guess_raw_key(raw_data, activity.activity_type, "facility_code"),
+                    "vendor": _guess_raw_key(raw_data, activity.activity_type, "vendor"),
+                }
+                for field_name, raw_key in field_to_raw_key.items():
+                    if field_name in data and raw_key:
+                        raw_data[raw_key] = str(data[field_name])
+                raw_row.raw_data = raw_data
+                raw_row.save(update_fields=["raw_data"])
+
+                activity.save()
+                after = _snapshot(activity)
+
+                # Write audit log
+                edit_note = data.get("edit_note", "")
+                detail = (
+                    f"Activity edited by {request.user}. "
+                    f"Fields changed: {', '.join(changed_fields) or 'none'}. "
+                    f"Note: {edit_note or 'No note provided.'}"
+                )
+                _write_audit(
+                    activity=activity,
+                    actor=request.user,
+                    action=AuditLog.Action.ACTIVITY_EDITED,
+                    before=before,
+                    after=after,
+                    detail=detail,
+                    ip=ip,
+                )
+
+        except LockedActivityError:
+            return Response(
+                {"detail": "This activity is locked and cannot be modified."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(self.get_serializer(activity).data)
+
 
 class ReviewSummaryView(APIView):
     permission_classes = [IsAuthenticated]
@@ -293,3 +426,40 @@ class ReviewSummaryView(APIView):
                 },
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _guess_raw_key(raw_data: dict, activity_type: str, field_hint: str) -> str | None:
+    """
+    Given a raw_data dict and a field hint, try to find the matching key
+    in the raw data. This handles the fact that different parsers use
+    different internal key names.
+
+    Returns the raw key name, or None if not found.
+    """
+    # Map from field hints to possible raw_data keys
+    key_candidates = {
+        "value": [
+            "consumption_kwh", "quantity", "distance_km", "nights",
+            "original_value", "kwh", "amount",
+        ],
+        "cost_center": [
+            "cost_center", "cost_centre", "KOSTL",
+        ],
+        "facility_code": [
+            "meter_id", "plant_code", "facility_code", "origin",
+        ],
+        "vendor": [
+            "vendor", "vendor_name", "vendor_id", "supplier",
+        ],
+    }
+
+    candidates = key_candidates.get(field_hint, [field_hint])
+    for candidate in candidates:
+        if candidate in raw_data:
+            return candidate
+    return None
+

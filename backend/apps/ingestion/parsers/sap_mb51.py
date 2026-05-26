@@ -39,6 +39,12 @@ Real-world quirks this parser handles
    Materialdokument number twice. We detect this within a single run
    and skip the duplicate, logging it as a warning.
 
+8. Flexible column mapping (resilient ingestion).
+   Files from different SAP systems/versions may use different column
+   names. We use an alias system. Only columns essential for CO2
+   calculation (quantity, unit, material, posting_date) cause failure
+   when truly absent.
+
 What this parser does NOT handle (and why)
 -------------------------------------------
 - Movement type 261 (goods issue to production) — we only ingest
@@ -69,63 +75,107 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-# German SAP header → internal key used throughout this parser.
-# Only columns we actually use are listed; everything else is ignored.
-HEADER_MAP = {
-    # Technical SAP field names / common export aliases
-    "WERKS":             "plant_code",
-    "WERK":              "plant_code",
-    "MATNR":             "material_number",
-    "KURZTEXT":          "material_desc",
-    "BWART":             "movement_type",
-    "MENGE":             "quantity",
-    "MEINS":             "unit",
-    "BUDAT":             "posting_date",
-    "LIFNR":             "vendor_id",
-    "LIEFERANTENNAME":   "vendor_name",
-    "EINKAUFSBELEG":     "po_number",
-    "KOSTENSTELLE":      "cost_centre",
-    "KOSTL":             "cost_centre",
-    "WAEHRUNG":          "currency",
-    "WÄHRUNG":           "currency",
-    "WERT":              "amount",
+# ---------------------------------------------------------------------------
+# Flexible column alias map
+# ---------------------------------------------------------------------------
+# Each internal key maps to a list of case-insensitive aliases.
+# The first matching alias in the CSV header wins.
+#
+# CRITICAL for CO2 = quantity, unit, material_number, posting_date
+# OPTIONAL = everything else (plant_code, cost_centre, vendor, amount, etc.)
 
-    # Material document identity
-    "Materialdokument":  "doc_number",
-    "Pos.":              "doc_position",
+COLUMN_ALIASES = {
+    # --- CRITICAL for CO2 calculation ---
+    "quantity": [
+        "MENGE", "Menge", "quantity", "qty", "menge",
+    ],
+    "unit": [
+        "MEINS", "Mengeneinheit", "unit", "uom", "meins",
+    ],
+    "material_number": [
+        "MATNR", "Materialnummer", "material_number", "material",
+        "material_no", "material_code", "matnr",
+    ],
+    "posting_date": [
+        "BUDAT", "Buchungsdatum", "posting_date", "post_date",
+        "document_date", "doc_date", "budat",
+    ],
 
-    # Dates
-    "Buchungsdatum":     "posting_date",    # DD.MM.YYYY
-    "Belegjahr":         "fiscal_year",
-
-    # Organisational units
-    "Werk":              "plant_code",       # WERKS
-    "Lagerort":          "storage_location", # LGORT
-
-    # Material
-    "Materialnummer":    "material_number",  # MATNR
-    "Kurztext":          "material_desc",    # MAKTX
-
-    # Movement
-    "Bewegungsart":      "movement_type",    # BWART — 101 = GR from PO
-
-    # Quantity
-    "Menge":             "quantity",         # MENGE
-    "Mengeneinheit":     "unit",             # MEINS
-
-    # Value
-    "Wert (HW)":         "amount",           # DMBTR in local currency
-    "Währung":           "currency",         # WAERS
-
-    # Vendor / purchasing
-    "Lieferant":         "vendor_id",        # LIFNR
-    "Lieferantenname":   "vendor_name",
-    "Einkaufsbeleg":     "po_number",        # EBELN
-
-    # Cost assignment
-    "Kostenstelle":      "cost_centre",      # KOSTL
-    "Buchungsperiode":   "posting_period",
+    # --- OPTIONAL (used for context / reporting, not CO2 calc) ---
+    "plant_code": [
+        "WERKS", "WERK", "Werk", "plant_code", "plant", "werks", "werk",
+    ],
+    "material_desc": [
+        "KURZTEXT", "Kurztext", "material_desc", "description",
+        "material_description", "material_text",
+    ],
+    "movement_type": [
+        "BWART", "Bewegungsart", "movement_type", "mvt_type",
+        "mov_type", "bwart",
+    ],
+    "vendor_id": [
+        "LIFNR", "Lieferant", "vendor_id", "vendor_no",
+        "supplier_id", "lifnr",
+    ],
+    "vendor_name": [
+        "LIEFERANTENNAME", "Lieferantenname", "vendor_name",
+        "supplier_name", "vendor",
+    ],
+    "po_number": [
+        "EINKAUFSBELEG", "Einkaufsbeleg", "po_number", "purchase_order",
+        "ebeln", "EBELN",
+    ],
+    "cost_centre": [
+        "KOSTENSTELLE", "KOSTL", "Kostenstelle", "cost_centre",
+        "cost_center", "kostl",
+    ],
+    "currency": [
+        "WAEHRUNG", "WÄHRUNG", "Währung", "currency", "waers",
+        "WAERS", "currency_code",
+    ],
+    "amount": [
+        "WERT", "Wert (HW)", "amount", "value", "total_amount",
+        "doc_value", "wert",
+    ],
+    "doc_number": [
+        "Materialdokument", "doc_number", "document_number",
+        "material_document",
+    ],
+    "doc_position": [
+        "Pos.", "doc_position", "item", "position",
+    ],
+    "fiscal_year": [
+        "Belegjahr", "fiscal_year", "year",
+    ],
+    "storage_location": [
+        "Lagerort", "storage_location", "sloc", "lgort", "LGORT",
+    ],
+    "posting_period": [
+        "Buchungsperiode", "posting_period", "period",
+    ],
 }
+
+
+def _build_column_map(fieldnames: list[str]) -> dict[str, str]:
+    """
+    Given the raw CSV column headers, build a mapping:
+        raw_column_name -> internal_key
+
+    Uses case-insensitive matching against COLUMN_ALIASES.
+    Columns not matching any alias are kept as-is (pass-through).
+    """
+    mapping = {}
+    normalised_fields = {f.strip().lower(): f.strip() for f in fieldnames if f}
+
+    for internal_key, aliases in COLUMN_ALIASES.items():
+        for alias in aliases:
+            if alias.lower() in normalised_fields:
+                original_header = normalised_fields[alias.lower()]
+                mapping[original_header] = internal_key
+                break
+
+    return mapping
+
 
 # Material number prefixes → (activity_type, emission_factor_fuel_type, scope)
 # A real deployment would drive this from a configurable material master table.
@@ -216,8 +266,43 @@ class SapMb51Parser(BaseParser):
             skipinitialspace=True,
         )
 
+        if reader.fieldnames is None:
+            raise ValueError("File appears to be empty — no header row found.")
+
+        # Build flexible column mapping from aliases
+        col_map = _build_column_map(reader.fieldnames)
+        mapped_internal_keys = set(col_map.values())
+
+        # --- Check ONLY critical columns for CO2 calculation ---
+        # Critical: quantity (the value to multiply by EF) and posting_date
+        # material_number is needed to identify fuel type, but if missing
+        # we'll try to infer or skip rows gracefully
+        critical_missing = []
+        if "quantity" not in mapped_internal_keys:
+            critical_missing.append("quantity")
+        if "posting_date" not in mapped_internal_keys:
+            critical_missing.append("posting_date")
+
+        if critical_missing:
+            raise ValueError(
+                f"Missing critical columns for CO2 calculation: {', '.join(critical_missing)}. "
+                f"Expected aliases: {', '.join(COLUMN_ALIASES.get(k, [k])[0] for k in critical_missing)}. "
+                f"Found columns: {', '.join(sorted(h.strip() for h in reader.fieldnames if h))}"
+            )
+
+        # Log optional columns not found
+        optional_missing = [
+            k for k in COLUMN_ALIASES
+            if k not in mapped_internal_keys and k not in critical_missing
+        ]
+        if optional_missing:
+            logger.info(
+                "SAP MB51 parser: optional columns not found (will use defaults): %s",
+                ", ".join(optional_missing),
+            )
+
         # Translate German headers to internal keys on the first row.
-        # If a header is not in HEADER_MAP we keep it as-is so raw_data
+        # If a header is not in the col_map we keep it as-is so raw_data
         # is always a complete copy of the source row.
         for raw_row in reader:
             # Strip whitespace from all values (SAP pads some fields)
@@ -226,7 +311,7 @@ class SapMb51Parser(BaseParser):
             # Translate to internal keys
             translated = {}
             for header, value in cleaned.items():
-                internal_key = HEADER_MAP.get(header, header)
+                internal_key = col_map.get(header, header)
                 translated[internal_key] = value
 
             yield translated
@@ -241,19 +326,34 @@ class SapMb51Parser(BaseParser):
         """
         warnings = []
 
-        # Required fields
-        for field in ("posting_date", "quantity", "unit", "material_number"):
-            if not raw.get(field):
-                warnings.append(f"missing_required_field: '{field}' is blank")
+        # Critical fields — warn (actual failure happens in _normalize_row)
+        if not raw.get("quantity"):
+            warnings.append("missing_critical_field: 'quantity' is blank")
+        if not raw.get("posting_date"):
+            warnings.append("missing_critical_field: 'posting_date' is blank")
 
-        # Movement type filter
+        # Material number — needed for fuel type but we handle missing gracefully
+        if not raw.get("material_number"):
+            warnings.append(
+                "missing_field: 'material_number' is blank — "
+                "cannot identify fuel type for CO2 calculation"
+            )
+
+        # Unit — needed for unit conversion
+        if not raw.get("unit"):
+            warnings.append(
+                "missing_field: 'unit' is blank — "
+                "will default to base unit"
+            )
+
+        # Movement type filter (optional column)
         mvt = raw.get("movement_type", "")
         if mvt and mvt not in ACCEPTED_MOVEMENT_TYPES:
             warnings.append(
                 f"skipped_movement_type: {mvt} is not a goods receipt (101)"
             )
 
-        # Cost centre
+        # Cost centre (optional)
         if not raw.get("cost_centre"):
             warnings.append(
                 "missing_cost_centre: KOSTL is blank — "
@@ -275,7 +375,7 @@ class SapMb51Parser(BaseParser):
         raw   = raw_row.raw_data
         tenant = run.tenant
 
-        # ── Skip non-GR movement types ────────────────────────────────
+        # ── Skip non-GR movement types (only if column was present) ───
         mvt = raw.get("movement_type", "")
         if mvt and mvt not in ACCEPTED_MOVEMENT_TYPES:
             logger.debug(
@@ -289,22 +389,29 @@ class SapMb51Parser(BaseParser):
         activity_type, ef_fuel_key, scope = _classify_material(matnr)
 
         if activity_type is None:
-            logger.debug(
-                "Run %s row %s: unknown material '%s' — skipping",
-                run.id, raw_row.row_number, matnr,
-            )
-            # Record as a failed row so the analyst can see it
-            raw_row.parse_status = RawRow.ParseStatus.FAILED
-            raw_row.parse_errors = raw_row.parse_errors + [
-                f"unknown_material: '{matnr}' not in material map"
-            ]
-            raw_row.save(update_fields=["parse_status", "parse_errors"])
-            return None
+            # If material_number column was not in the file at all,
+            # try to infer from description or just mark as unknown
+            material_desc = raw.get("material_desc", "").upper()
+            activity_type, ef_fuel_key, scope = _classify_from_description(material_desc)
+
+            if activity_type is None:
+                logger.debug(
+                    "Run %s row %s: unknown material '%s' — skipping",
+                    run.id, raw_row.row_number, matnr,
+                )
+                # Record as a failed row so the analyst can see it
+                raw_row.parse_status = RawRow.ParseStatus.FAILED
+                raw_row.parse_errors = raw_row.parse_errors + [
+                    f"unknown_material: '{matnr}' not in material map "
+                    f"and could not be inferred from description"
+                ]
+                raw_row.save(update_fields=["parse_status", "parse_errors"])
+                return None
 
         # ── Parse quantity and unit ───────────────────────────────────
         try:
-            raw_qty  = Decimal(raw.get("quantity", "0").replace(",", "."))
-            raw_unit = raw.get("unit", "").strip().upper()
+            raw_qty  = Decimal(raw.get("quantity", "0").replace(",", ".") or "0")
+            raw_unit = raw.get("unit", "").strip().upper() or "L"  # default to L
         except InvalidOperation:
             raw_row.parse_status = RawRow.ParseStatus.FAILED
             raw_row.parse_errors = raw_row.parse_errors + [
@@ -343,7 +450,7 @@ class SapMb51Parser(BaseParser):
             raw_row.save(update_fields=["parse_status", "parse_errors"])
             return None
 
-        # ── Plant lookup ──────────────────────────────────────────────
+        # ── Plant lookup (optional) ───────────────────────────────────
         plant_code = raw.get("plant_code", "")
         plant_name = ""
         country_code = ""
@@ -364,7 +471,7 @@ class SapMb51Parser(BaseParser):
         else:
             flag_reasons.append("missing_plant_code: WERKS is blank")
 
-        # ── Parse monetary amount ─────────────────────────────────────
+        # ── Parse monetary amount (optional) ──────────────────────────
         try:
             original_amount = Decimal(
                 raw.get("amount", "0").replace(",", ".") or "0"
@@ -437,6 +544,36 @@ def _classify_material(matnr: str):
     return (None, None, None)
 
 
+def _classify_from_description(description: str):
+    """
+    Fallback classification when material_number doesn't match MATERIAL_MAP.
+    Tries to identify fuel type from the material description text.
+    Returns (activity_type, ef_fuel_key, scope) or (None, None, None).
+    """
+    if not description:
+        return (None, None, None)
+
+    desc_upper = description.upper()
+
+    # Check for fuel-related keywords in the description
+    keyword_map = {
+        "diesel":      ("diesel",      "diesel",      "1"),
+        "lpg":         ("lpg",         "lpg",         "1"),
+        "propane":     ("lpg",         "lpg",         "1"),
+        "heating oil": ("heating_oil", "heating_oil", "1"),
+        "heizöl":      ("heating_oil", "heating_oil", "1"),
+        "natural gas": ("natural_gas", "natural_gas", "1"),
+        "erdgas":      ("natural_gas", "natural_gas", "1"),
+        "cng":         ("natural_gas", "natural_gas", "1"),
+    }
+
+    for keyword, mapping in keyword_map.items():
+        if keyword.upper() in desc_upper:
+            return mapping
+
+    return (None, None, None)
+
+
 def _normalise_unit(qty: Decimal, unit: str, activity_type: str):
     """
     Convert quantity to the unit the emission factor expects.
@@ -495,4 +632,3 @@ def _get_emission_factor(fuel_type: str, unit: str):
         .order_by("-valid_from_year")
         .first()
     )
-

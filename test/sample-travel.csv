@@ -1,0 +1,4 @@
+report_id,expense_id,employee_id,expense_type,transaction_date,departure_code,arrival_code,quantity_nights,amount,currency,category,distance_km
+RPT-000123,EXP-1001,E12345,Flight,2026-05-10T09:30:00Z,SFO,JFK,,350.75,USD,,
+RPT-000123,EXP-1002,E12345,Hotel,2026-05-11,,,"2",450.00,EUR,,
+RPT-000123,EXP-1003,E12345,Ground Transport,2026-05-12,,,,150.00,EUR,Car Rental,

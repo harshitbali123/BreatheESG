@@ -66,7 +66,7 @@ from decimal import Decimal, InvalidOperation
 
 from apps.ingestion.models import IngestionRun, RawRow
 from apps.normalization.models import EmissionFactor, NormalizedActivity
-from .base import BaseParser
+from .base import BaseParser, parse_flexible_date
 
 logger = logging.getLogger(__name__)
 
@@ -218,8 +218,8 @@ class UtilityParser(BaseParser):
             pass  # caught properly in _normalize_row
 
         # Billing period length
-        start = _parse_date(raw.get("period_start", ""))
-        end   = _parse_date(raw.get("period_end", ""))
+        start = parse_flexible_date(raw.get("period_start", ""))
+        end   = parse_flexible_date(raw.get("period_end", ""))
         if start and end:
             delta = (end - start).days
             if delta < MIN_PERIOD_DAYS:
@@ -278,8 +278,8 @@ class UtilityParser(BaseParser):
             return None
 
         # ── Parse dates ───────────────────────────────────────────────
-        period_start = _parse_date(raw.get("period_start", ""))
-        period_end   = _parse_date(raw.get("period_end", ""))
+        period_start = parse_flexible_date(raw.get("period_start", ""))
+        period_end   = parse_flexible_date(raw.get("period_end", ""))
 
         if period_start is None:
             raw_row.parse_status = RawRow.ParseStatus.FAILED
@@ -376,38 +376,7 @@ class UtilityParser(BaseParser):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_date(date_str: str):
-    """
-    Parse DD.MM.YYYY into a Python date. Returns None on failure.
-    Handles both DD.MM.YYYY (portal standard) and YYYY-MM-DD
-    (some portals export ISO format depending on locale settings).
-    """
-    if not date_str or not date_str.strip():
-        return None
 
-    s = date_str.strip()
-
-    # DD.MM.YYYY
-    if "." in s:
-        parts = s.split(".")
-        if len(parts) == 3:
-            try:
-                d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-                return date(y, m, d)
-            except (ValueError, IndexError):
-                return None
-
-    # YYYY-MM-DD (ISO fallback)
-    if "-" in s:
-        parts = s.split("-")
-        if len(parts) == 3:
-            try:
-                y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
-                return date(y, m, d)
-            except (ValueError, IndexError):
-                return None
-
-    return None
 
 
 def _resolve_emission_factor(tenant):

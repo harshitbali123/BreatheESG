@@ -20,7 +20,9 @@ The base class handles:
 """
 
 import logging
+import re
 from abc import ABC, abstractmethod
+from datetime import date, datetime
 from django.db import transaction
 
 from apps.ingestion.models import IngestionRun, RawRow
@@ -28,6 +30,92 @@ from apps.normalization.models import NormalizedActivity
 from apps.audit.models import AuditLog
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Flexible date parser — shared by all parsers
+# ---------------------------------------------------------------------------
+
+# strptime format strings ordered from most specific to least.
+# We try each one until one succeeds.
+_DATE_FORMATS = [
+    # ISO 8601
+    "%Y-%m-%dT%H:%M:%S",       # 2024-01-03T14:30:00
+    "%Y-%m-%dT%H:%M",          # 2024-01-03T14:30
+    "%Y-%m-%d",                 # 2024-01-03
+    "%Y/%m/%d",                 # 2024/01/03
+
+    # German / European  (day first)
+    "%d.%m.%Y",                 # 03.01.2024
+    "%d-%m-%Y",                 # 03-01-2024
+    "%d/%m/%Y",                 # 03/01/2024
+
+    # US  (month first)
+    "%m/%d/%Y",                 # 01/03/2024
+    "%m-%d-%Y",                 # 01-03-2024
+
+    # With 2-digit year
+    "%d.%m.%y",                 # 03.01.24
+    "%d-%m-%y",                 # 03-01-24
+    "%d/%m/%y",                 # 03/01/24
+    "%m/%d/%y",                 # 01/03/24
+    "%Y%m%d",                   # 20240103  (compact ISO)
+
+    # Long month names
+    "%d %B %Y",                 # 03 January 2024
+    "%d %b %Y",                 # 03 Jan 2024
+    "%B %d, %Y",                # January 03, 2024
+    "%b %d, %Y",                # Jan 03, 2024
+    "%d-%b-%Y",                 # 03-Jan-2024
+    "%d-%B-%Y",                 # 03-January-2024
+]
+
+# Pre-compiled regex to strip ordinal suffixes (1st, 2nd, 3rd, 4th …)
+_ORDINAL_RE = re.compile(r'(\d+)(st|nd|rd|th)\b', re.IGNORECASE)
+
+
+def parse_flexible_date(date_str: str):
+    """
+    Attempt to parse a date string using many common formats.
+
+    Returns a ``datetime.date`` on success, or ``None`` if no format
+    matched.  Never raises — callers should treat ``None`` as a
+    parse failure and handle it accordingly.
+
+    Supported families:
+        ISO:     2024-01-03, 2024/01/03, 20240103
+        German:  03.01.2024, 03-01-2024
+        EU:      03/01/2024  (day/month/year)
+        US:      01/03/2024  (month/day/year — tried after EU)
+        Long:    03 January 2024, Jan 03, 2024, 03-Jan-2024
+        Short:   03.01.24, 01/03/24
+        ISO+T:   2024-01-03T14:30:00
+
+    Ambiguity note (DD/MM vs MM/DD):
+        When a date like ``03/01/2024`` is encountered, we try
+        DD/MM/YYYY *first* (European convention), then MM/DD/YYYY.
+        Both will succeed only when day ≤ 12. The European reading
+        wins in that edge case — which matches the SAP / German
+        origin of most BreatheESG uploads.
+    """
+    if not date_str or not date_str.strip():
+        return None
+
+    s = date_str.strip()
+
+    # Remove ordinal suffixes so "3rd January 2024" becomes "3 January 2024"
+    s = _ORDINAL_RE.sub(r'\1', s)
+
+    for fmt in _DATE_FORMATS:
+        try:
+            dt = datetime.strptime(s, fmt)
+            # Sanity: reject dates outside a reasonable range
+            if 1900 <= dt.year <= 2100:
+                return dt.date()
+        except ValueError:
+            continue
+
+    return None
 
 
 class BaseParser(ABC):

@@ -60,7 +60,7 @@ from decimal import Decimal, InvalidOperation
 from apps.ingestion.models import IngestionRun, RawRow
 from apps.normalization.models import EmissionFactor, NormalizedActivity
 from apps.tenants.models import PlantLookup
-from .base import BaseParser
+from .base import BaseParser, parse_flexible_date
 
 logger = logging.getLogger(__name__)
 
@@ -146,9 +146,6 @@ DIESEL_DENSITY_KG_PER_L = Decimal("0.8400")
 # LPG density for M3 → KG conversion (propane at ~20°C)
 LPG_DENSITY_KG_PER_M3 = Decimal("1.8980")
 
-# Any single-day receipt above this number of litres (or kg-equivalent)
-# triggers a suspicion flag. Analyst must explicitly approve or dismiss.
-OUTLIER_THRESHOLD = Decimal("100000")
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +195,20 @@ class SapMb51Parser(BaseParser):
                 "Could not decode the file. Expected UTF-8 or Latin-1 encoding."
             )
 
-        # SAP exports use tab as the delimiter. Some older exports use
-        # a semicolon; we detect by checking the first line.
+        # SAP exports may use tab, semicolon, or comma as the delimiter.
+        # We use csv.Sniffer for robust detection, with a heuristic fallback.
         first_line = text.split("\n")[0]
-        delimiter  = "\t" if "\t" in first_line else ";"
+        try:
+            dialect = csv.Sniffer().sniff(first_line, delimiters='\t;,')
+            delimiter = dialect.delimiter
+        except csv.Error:
+            # Fallback heuristic: tab → semicolon → comma
+            if "\t" in first_line:
+                delimiter = "\t"
+            elif ";" in first_line:
+                delimiter = ";"
+            else:
+                delimiter = ","
 
         reader = csv.DictReader(
             io.StringIO(text),
@@ -253,13 +260,7 @@ class SapMb51Parser(BaseParser):
                 "cost centre not assigned in SAP"
             )
 
-        # Date format sanity
-        posting_date = raw.get("posting_date", "")
-        if posting_date and not _looks_like_german_date(posting_date):
-            warnings.append(
-                f"unexpected_date_format: '{posting_date}' "
-                "is not DD.MM.YYYY — date parsing may fail"
-            )
+
 
         return warnings
 
@@ -332,7 +333,7 @@ class SapMb51Parser(BaseParser):
         kg_co2e = norm_qty * ef.kg_co2e_per_unit
 
         # ── Parse date ────────────────────────────────────────────────
-        activity_date = _parse_german_date(raw.get("posting_date", ""))
+        activity_date = parse_flexible_date(raw.get("posting_date", ""))
         if activity_date is None:
             raw_row.parse_status = RawRow.ParseStatus.FAILED
             raw_row.parse_errors = raw_row.parse_errors + [
@@ -363,15 +364,6 @@ class SapMb51Parser(BaseParser):
         else:
             flag_reasons.append("missing_plant_code: WERKS is blank")
 
-        # ── Outlier detection ─────────────────────────────────────────
-        # Compare normalised quantity (always in factor's unit) to threshold.
-        if norm_qty > OUTLIER_THRESHOLD:
-            flag_reasons.append(
-                f"value_outlier: {norm_qty} {norm_unit} in a single receipt "
-                f"exceeds the threshold of {OUTLIER_THRESHOLD} — "
-                "verify against purchase order"
-            )
-
         # ── Parse monetary amount ─────────────────────────────────────
         try:
             original_amount = Decimal(
@@ -395,7 +387,7 @@ class SapMb51Parser(BaseParser):
             facility_code = plant_code,
             facility_name = plant_name,
             country_code  = country_code,
-            cost_centre   = raw.get("cost_centre", ""),
+            cost_center   = raw.get("cost_centre", ""),
             vendor        = raw.get("vendor_name", raw.get("vendor_id", "")),
 
             scope           = scope,
@@ -504,39 +496,3 @@ def _get_emission_factor(fuel_type: str, unit: str):
         .first()
     )
 
-
-def _parse_german_date(date_str: str):
-    """
-    Parse DD.MM.YYYY into a Python date object.
-    Returns None on failure rather than raising — callers handle None.
-
-    Examples:
-        "03.01.2024" → date(2024, 1, 3)
-        "31.12.2023" → date(2023, 12, 31)
-        ""           → None
-    """
-    if not date_str or not date_str.strip():
-        return None
-    try:
-        parts = date_str.strip().split(".")
-        if len(parts) != 3:
-            return None
-        day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
-        return date(year, month, day)
-    except (ValueError, IndexError):
-        return None
-
-
-def _looks_like_german_date(date_str: str) -> bool:
-    """
-    Quick sanity check before attempting full parse.
-    Validates the XX.XX.XXXX pattern without allocating a date object.
-    """
-    parts = date_str.strip().split(".")
-    if len(parts) != 3:
-        return False
-    try:
-        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-        return 1 <= d <= 31 and 1 <= m <= 12 and 1900 <= y <= 2100
-    except ValueError:
-        return False

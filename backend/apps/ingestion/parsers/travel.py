@@ -18,7 +18,7 @@ from typing import Optional
 from apps.ingestion.models import IngestionRun, RawRow
 from apps.normalization.models import EmissionFactor, NormalizedActivity
 
-from .base import BaseParser
+from .base import BaseParser, parse_flexible_date
 from .iata_distances import distance_km, unknown_airports
 
 logger = logging.getLogger(__name__)
@@ -191,7 +191,7 @@ class TravelParser(BaseParser):
 			_fail_raw_row(raw_row, f"unknown_expense_type: '{expense_type}'")
 			return None
 
-		activity_date = _parse_date(raw.get("travel_date", ""))
+		activity_date = parse_flexible_date(raw.get("travel_date", ""))
 		if activity_date is None:
 			if not raw.get("travel_date"):
 				_fail_raw_row(raw_row, "missing_required_field: 'travel_date' is blank")
@@ -373,31 +373,7 @@ def _fail_raw_row(raw_row: RawRow, message: str) -> None:
 	raw_row.save(update_fields=["parse_status", "parse_errors"])
 
 
-def _parse_date(date_str: str) -> Optional[date]:
-	if not date_str or not date_str.strip():
-		return None
 
-	value = date_str.strip()
-
-	if "." in value:
-		parts = value.split(".")
-		if len(parts) == 3:
-			try:
-				return date(int(parts[2]), int(parts[1]), int(parts[0]))
-			except ValueError:
-				return None
-
-	if "-" in value:
-		parts = value.split("-")
-		if len(parts) == 3:
-			try:
-				if len(parts[0]) == 4:
-					return date(int(parts[0]), int(parts[1]), int(parts[2]))
-				return date(int(parts[2]), int(parts[1]), int(parts[0]))
-			except ValueError:
-				return None
-
-	return None
 
 
 def _parse_decimal(value: str) -> Optional[Decimal]:

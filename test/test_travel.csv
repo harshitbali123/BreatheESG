@@ -1,0 +1,21 @@
+trip_id,expense_type,travel_date,origin,destination,cabin_class,nights,distance_km,employee_id,cost_center,amount,currency,vendor
+T-001,AIR,15.01.2024,FRA,LHR,Business,,,EMP-1042,CC-SALES,1240.00,EUR,Lufthansa
+T-001,HOTEL,15.01.2024,London,,,2,,EMP-1042,CC-SALES,420.00,GBP,Marriott London
+T-001,AIR,17.01.2024,LHR,FRA,Business,,,EMP-1042,CC-SALES,1240.00,EUR,Lufthansa
+T-002,AIR,18.01.2024,BOM,DEL,,,,EMP-2201,CC-OPS,8500.00,INR,IndiGo
+T-003,AIR,25.01.2024,FRA,SIN,Economy,,,EMP-1042,CC-SALES,890.00,EUR,Singapore Airlines
+T-004,CAR,10.02.2024,Hamburg Airport,Hamburg HQ,,,38,EMP-3301,,65.00,EUR,Sixt
+T-005,TRAIN,12.02.2024,Frankfurt Hbf,Berlin Hbf,,,545,EMP-3301,CC-OPS,89.00,EUR,Deutsche Bahn
+T-006,AIR,14.02.2024,DXB,BOM,First,,,EMP-4401,CC-EXEC,3200.00,USD,Emirates
+T-007,AIR,20.02.2024,XXX,LHR,Economy,,,EMP-5501,,980.00,GBP,Unknown Airline
+T-008,AIR,25.02.2024,BOM,LHR,,,,,, ,GBP,Air India
+T-009,HOTEL,01.03.2024,Singapore,,,0,,EMP-6601,CC-APAC,0.00,SGD,Some Hotel
+T-010,AIR,05.03.2024,FRA,FRA,Economy,,,EMP-7701,CC-SALES,0.00,EUR,Test Airline
+T-011,FERRY,10.03.2024,Dover,Calais,,,50,EMP-3301,CC-OPS,45.00,GBP,P&O Ferries
+T-012,AIR,NOT-A-DATE,BOM,DEL,Economy,,,EMP-2201,CC-OPS,8000.00,INR,IndiGo
+T-013,CAR,15.03.2024,Munich Office,Airport,,,NOTANUM,EMP-8801,CC-OPS,55.00,EUR,Hertz
+T-014,TRAIN,20.03.2024,Paris Gare du Nord,London St Pancras,,,495,EMP-7701,CC-SALES,180.00,EUR,Eurostar
+T-014,TRAIN,20.03.2024,Paris Gare du Nord,London St Pancras,,,495,EMP-7701,CC-SALES,180.00,EUR,Eurostar
+T-015,AIR,25.03.2024,JFK,LAX,Economy,,,EMP-2201,CC-OPS,320.00,USD,Delta
+T-016,HOTEL,28.03.2024,New York,,,4,,EMP-4401,CC-EXEC,1200.00,USD,Hilton NY
+T-016,AIR,01.04.2024,LHR,BOM,EXECUTIVE,,,EMP-4401,CC-EXEC,2800.00,GBP,British Airways

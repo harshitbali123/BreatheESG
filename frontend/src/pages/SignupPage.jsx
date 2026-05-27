@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Leaf, Eye, EyeOff, Loader2, Building2, User, Mail, Lock, Globe } from 'lucide-react';
-import axios from 'axios';
+import api from '../api/axios';
 
 const COUNTRY_CODES = [
   { code: 'US', name: 'United States' },
@@ -73,7 +73,7 @@ export default function SignupPage() {
     setErrors({});
     setGlobalError('');
     try {
-      const { data } = await axios.post('/api/tenants/register/', form);
+      const { data } = await api.post('/tenants/register/', form);
       // Store tokens & log in
       localStorage.setItem('access_token', data.access);
       localStorage.setItem('refresh_token', data.refresh);

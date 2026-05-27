@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://breathe-esg-backend-48qs.onrender.com/api/:path*"
+    }
+  ]
+}
